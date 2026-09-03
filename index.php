@@ -1776,9 +1776,9 @@ async function jumpToMessage(id){
   } catch(e){}
 }
 /* fetch around(id) 一批并入 MSGS；数量 = CHUNK（一切数量都应是 chunk 的整数倍）。 */
-var AROUND_N = CHUNK;
 async function fetchAround(id){
-  const res = await fetch(api('messages?around=' + id + '&limit=' + AROUND_N));
+  // around 取 2×当前 CHUNK（不缓存成顶层常量：CHUNK 会随屏幕自适应变化）
+  const res = await fetch(api('messages?around=' + id + '&limit=' + (CHUNK * 2)));
   const j = await res.json();
   if (j && j.ok){
     noteLatest(j.slice);
@@ -2598,13 +2598,14 @@ function renderNewer(msgs){
   return added;
 }
 
-/* 裁掉 DOM 中距离“当前位置(锚点行)”过远的消息：锚点上方、下方各最多保留 DOM_LIMIT(=100) 条。
-   只移除 DOM 行(不删 MSGS 缓存、不动 fetchedRanges)，防止翻片后 DOM 无限膨胀。 */
-var DOM_LIMIT = 100;
+/* 裁掉 DOM 中距离“当前位置(锚点行)”过远的消息：锚点上方、下方各最多保留 2×CHUNK 条。
+   只移除 DOM 行(不删 MSGS 缓存、不动 fetchedRanges)，防止翻片后 DOM 无限膨胀。
+   不用顶层常量：CHUNK 随屏幕自适应，裁剪边界须动态取当前值。 */
 function trimDomAround(anchorEl){
   if (!chat) return;
+  const LIMIT = CHUNK * 2;
   const rows = Array.from(chat.querySelectorAll('.msg'));
-  if (rows.length <= DOM_LIMIT * 2 + 1) return;
+  if (rows.length <= LIMIT * 2 + 1) return;
   // 中心：锚点行优先，否则取可视第一条，再否则中部行
   let center = -1;
   if (anchorEl && anchorEl.isConnected){
@@ -2616,10 +2617,10 @@ function trimDomAround(anchorEl){
   }
   if (center < 0) center = Math.floor(rows.length / 2);
   const remove = [];
-  // 上方超过 DOM_LIMIT 条的行（center 之前的第 101 条再往上）
-  for (let i = center - DOM_LIMIT - 1; i >= 0; i--) remove.push(rows[i]);
-  // 下方超过 DOM_LIMIT 条的行（center 之后的第 101 条再往下）
-  for (let i = center + DOM_LIMIT + 1; i < rows.length; i++) remove.push(rows[i]);
+  // 上方超过 LIMIT 条的行（center 之前的第 LIMIT+1 条再往上）
+  for (let i = center - LIMIT - 1; i >= 0; i--) remove.push(rows[i]);
+  // 下方超过 LIMIT 条的行（center 之后的第 LIMIT+1 条再往下）
+  for (let i = center + LIMIT + 1; i < rows.length; i++) remove.push(rows[i]);
   remove.forEach(function(r){
     if (r && r.parentNode) r.parentNode.removeChild(r);
   });
