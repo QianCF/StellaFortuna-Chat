@@ -14,7 +14,6 @@ const ORION_ACCOUNTS = [
     'guest'  => ['访客',       '00000', false],
     //'laji'  => ['垃圾',       '55555', true],
 ];
-
 const DATA_DIR = __DIR__ . '/data';
 const POLL_SECONDS = 2;      // 轮询间隔
 
@@ -1639,9 +1638,9 @@ function isTouchDevice(){
   return (navigator.maxTouchPoints || 0) > 1 || ('ontouchstart' in window);
 }
 
-/* 移动端：把页面高度锁定为加载时测量的固定像素值。
-   虚拟键盘弹出只会触发 resize/visualViewport 变化、不会触发 orientationchange，
-   因此锁定后键盘弹出也不会改变显示高度。桌面手动缩放仍会重锁。 */
+/* 把页面高度锁定为“当前布局视口高度 innerHeight”（旋转后已更新、无键盘）的像素值。
+   只在 viewportLayout 判定 outerHeight(窗口真尺寸)变化时才调用；
+   键盘/工具栏只改 innerHeight 不改 outerHeight → 不会走到这里，锁定保持不动。 */
 function pinLayoutHeight(){
   const h = window.innerHeight;
   document.documentElement.style.height = h + 'px';
@@ -2352,7 +2351,6 @@ function hideNewMsgLabel(){
 function hideNewMsgIfBottom(){
   if (isAtBottom()) hideNewMsgLabel();
 }
-window.addEventListener('resize', function(){ positionNewMsg(); });
 
 /* 向上翻片：分两步。
    第 1 步【确保 MSGS 有更早数据】：目标上方区段若已全部在 fetchedRanges（已拉过），
@@ -2598,12 +2596,12 @@ function renderNewer(msgs){
   return added;
 }
 
-/* 裁掉 DOM 中距离“当前位置(锚点行)”过远的消息：锚点上方、下方各最多保留 2×CHUNK 条。
+/* 裁掉 DOM 中距离“当前位置(锚点行)”过远的消息：锚点上方、下方各最多保留 1×CHUNK 条。
    只移除 DOM 行(不删 MSGS 缓存、不动 fetchedRanges)，防止翻片后 DOM 无限膨胀。
    不用顶层常量：CHUNK 随屏幕自适应，裁剪边界须动态取当前值。 */
 function trimDomAround(anchorEl){
   if (!chat) return;
-  const LIMIT = CHUNK * 2;
+  const LIMIT = CHUNK;
   const rows = Array.from(chat.querySelectorAll('.msg'));
   if (rows.length <= LIMIT * 2 + 1) return;
   // 中心：锚点行优先，否则取可视第一条，再否则中部行
@@ -3657,10 +3655,38 @@ function loadDraft(){ try { return localStorage.getItem(draftKey()); } catch(e){
 async function init(){
   if (!CODE){ return; }
   computeChunk();                                  // 自适应 CHUNK（四屏幕的最矮消息数量）
-  // 锁定移动端显示高度：键盘弹出不改高度（桌面手动缩放仍会重锁）
+  // 布局时机统一规则：
+  //   只有“真正的窗口大小变化”才重新布局。键盘只改 innerHeight/outerHeight
+  //   （安卓 Chrome 实测 outerHeight 也会随键盘变），但不会改 screen.availHeight。
+  //   移动端：availHeight 变化（旋转/分屏）才布局，且延迟一拍——orientationchange 触发时
+  //   innerHeight 仍是旧方向的值，立即锁定会“以原高渲染”；等 150ms 旋转完成后再锁。
+  //   桌面端：无键盘干扰，resize 实时布局（reflowEditor 幂等，不会闪）。
+  //   页面安全高度由 CSS env(safe-area-inset-*) 的 padding 避让保证；
+  //   JS 只负责把布局视口高度(innerHeight)写死，避免键盘 adjustResize 压缩 100% 布局。
+  let _lastAvailH = 0;
+  let _layoutTimer = null;
+  function doLayoutNow(){
+    pinLayoutHeight();                            // innerHeight 此时已是新方向/新尺寸
+    // 旋转/尺寸变化后编辑器剩余高也要重算（chat 可用高变了，editor-full 判定可能翻转）；
+    // reflowEditor 内部幂等（同步临时移除测量，无闪），编辑器未开时也无副作用。
+    if (typeof reflowEditor === 'function') reflowEditor();
+    requestAnimationFrame(positionNewMsg);
+  }
+  function viewportLayout(){
+    if (isTouchDevice()){
+      const ah = (window.screen && screen.availHeight) || 0;
+      if (ah > 0 && ah === _lastAvailH) return;    // 屏幕可用高没变 → 键盘/工具栏 → 不布局
+      if (ah > 0) _lastAvailH = ah;
+      clearTimeout(_layoutTimer);
+      _layoutTimer = setTimeout(doLayoutNow, 150); // 等旋转完成，innerHeight 更新为新方向
+    } else {
+      doLayoutNow();                               // 桌面：实时评估（幂等，无闪）
+    }
+  }
+  window.addEventListener('resize', viewportLayout);
+  window.addEventListener('orientationchange', viewportLayout);
   pinLayoutHeight();
-  window.addEventListener('orientationchange', pinLayoutHeight);
-  if (!isTouchDevice()){ window.addEventListener('resize', pinLayoutHeight); }
+  _lastAvailH = (window.screen && screen.availHeight) || 0;
   const who = document.getElementById('whoTag');
   who.textContent = '当前身份：' + ME.name + (ME.canSend ? ' · 可发言' : ' · 仅阅读');
 
@@ -3691,26 +3717,45 @@ async function init(){
   const appRoot = document.getElementById('app');
   const MIN_CHAT_PX = 120;   // 消息区可用像素下限：低于则隐藏消息，让编辑器独占
 
-  /* 实测消息区可用像素：先去掉 editor-full 让聊天回到占位，强制触发一次布局回流后
-     量出其真实可用高度；若仍低于下限则隐藏消息、让编辑器压缩放大。
-     完全依据 #chat 实际高度判断，而非屏幕像素。 */
+  /* 编辑器全屏判定（幂等，不闪）：
+     聊天可用高 = app 内容高 − 顶栏高 − 编辑器自然高。
+     编辑器自然高在 editor-full 下会被拉伸，测量时【同步】临时移除 editor-full、
+     强制回流后量 composer、再立即加回——同一任务内完成，浏览器不绘制中间帧，
+     所以既不会闪，也永远量到真实自然高（无需缓存；缓存会在“旋转前已 full”时用过期值，
+     导致高度不够也不全屏）。 */
+  let _fullState = false;      // 当前是否 editor-full
+  function measureChatAvail(){
+    const topEl = appRoot.querySelector('.top');
+    const topH = topEl ? topEl.offsetHeight : 0;
+    const wasFull = _fullState;
+    if (wasFull) appRoot.classList.remove('editor-full');
+    try { void composer.offsetHeight; } catch(e){}   // 强制回流，让移除生效
+    const compH = composer.offsetHeight || 0;
+    if (wasFull) appRoot.classList.add('editor-full');
+    const cs = getComputedStyle(appRoot);
+    const pad = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+    return appRoot.clientHeight - pad - topH - compH;
+  }
   function reflowEditor(){
     requestAnimationFrame(function(){
-      if (!chat || !chat.isConnected) return;
-      appRoot.classList.remove('editor-full');
-      // 强制同步布局，确保上一条样式变更已生效；再推迟一拍实际测量
-      void chat.offsetHeight;
-      setTimeout(function(){
-        const h = chat.offsetHeight || 0;
-        appRoot.classList.toggle('editor-full', h < MIN_CHAT_PX);
-      }, 30);
+      try {
+        const avail = measureChatAvail();
+        const wantFull = avail < MIN_CHAT_PX;
+        if (wantFull !== _fullState){
+          _fullState = wantFull;
+          appRoot.classList.toggle('editor-full', wantFull);
+        }
+      } catch(e){}
     });
   }
   function applyEditorOpen(open){
     composer.classList.toggle('open', open);
     appRoot.classList.toggle('editor-open', open);
     toggleBtn.textContent = open ? '收起编辑器' : '写消息';
-    if (open){ reflowEditor(); } else { appRoot.classList.remove('editor-full'); }
+    if (open){ reflowEditor(); } else {
+      appRoot.classList.remove('editor-full');
+      _fullState = false;
+    }
     // 编辑器占用空间改变了聊天区高度 → 重新定位“有新消息”标识
     requestAnimationFrame(positionNewMsg);
   }
@@ -3719,10 +3764,6 @@ async function init(){
     if (composer.classList.contains('open')){ renderPreview(); }
     // 手机上打开编辑器不自动聚焦，避免弹出键盘遮住界面
     if (composer.classList.contains('open') && !isTouchDevice()){ focusEditor(); }
-  });
-  // 窗口尺寸变化时，若编辑器开着则重新实测消息区高度
-  window.addEventListener('resize', function(){
-    if (composer.classList.contains('open')) reflowEditor();
   });
   if (!ME.canSend){ toggleBtn.style.display='none'; }
   else { applyEditorOpen(false); }         // 默认隐藏
