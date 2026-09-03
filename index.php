@@ -14,6 +14,7 @@ const ORION_ACCOUNTS = [
     'guest'  => ['访客',       '00000', false],
     //'laji'  => ['垃圾',       '55555', true],
 ];
+
 const DATA_DIR = __DIR__ . '/data';
 const POLL_SECONDS = 2;      // 轮询间隔
 
@@ -90,18 +91,31 @@ button{touch-action:manipulation}
 
 /* ---------- 主界面 ----------
    根容器统一加底部安全区内边距：整块界面（含发送栏）整体避开底部 home 手势条。
-   env() 及 fallback 语法在 Chrome 69+ 均可用（103 没问题）。 */
-#app{display:none;flex-direction:column;height:100%;padding-bottom:env(safe-area-inset-bottom, 0px)}
-#app.on{display:flex}
+   env() 及 fallback 语法在 Chrome 69+ 均可用（103 没问题）。
+
+   布局用命名分区(grid-template-areas)纵向排三块：.top=top，chat=chat，composer=composer。
+   当高度不足需要编辑器独占时，由 JS 给 #app 加 editor-full 类：把网格缩成只有两个命名分区
+   top + main，并让 #chat 与 #composer 都放进【同一个命名分区 main】——两个 item 命中同一
+   个分区就意味着它们占据完全相同的一块区域(逐像素重叠)，而不是被 auto-placement 拆到不同列
+   去互相挤压。composer DOM 靠后、背景不透明，绘制在 chat 之上把它盖住。于是 chat【始终参与
+   布局】(从不 display:none)，消息不会被销毁，滚动/分片轮询/贴底判定在切换瞬间也不中断；
+   视觉上只是被编辑器压住。 */
+#app{
+  display:none;height:100%;padding-bottom:env(safe-area-inset-bottom, 0px);
+  grid-template-columns:minmax(0,1fr);
+  grid-template-rows:auto minmax(0,1fr) auto;
+  grid-template-areas:"top" "chat" "composer";
+}
+#app.on{display:grid}
 .top{
-  display:flex;align-items:center;gap:12px;
+  grid-area:top;display:flex;align-items:center;gap:12px;
   /* 顶栏避开顶部刘海/home指示条，并留出左右安全边距 */
   padding-top:max(10px, env(safe-area-inset-top, 0px));
   padding-bottom:10px;
   padding-left:max(14px, env(safe-area-inset-left, 0px));
   padding-right:max(14px, env(safe-area-inset-right, 0px));
   border-bottom:2px solid var(--line);
-  background:var(--bg);flex:0 0 auto;
+  background:var(--bg);
 }
 .top .room{font-size:16px;font-weight:bold;letter-spacing:.06em}
 .top .who{margin-left:auto;font-size:13px;color:var(--muted)}
@@ -128,7 +142,8 @@ button{touch-action:manipulation}
 }
 
 #chat{
-  flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;
+  /* grid 命名分区：chat 区＝第2行(minmax(0,1fr)) → 编辑器关闭或无内容时独占剩余高度 */
+  grid-area:chat;min-width:0;min-height:0;overflow-y:auto;overflow-x:hidden;
   padding-top:16px;
   padding-bottom:8px;
   padding-left:max(12px, env(safe-area-inset-left, 0px));
@@ -336,7 +351,7 @@ button{touch-action:manipulation}
 }
 
 /* ---------- 编辑器（猎户座编辑器功能面板，黑白方角） ---------- */
-#composer{flex:0 0 auto;border-top:2px solid var(--line);background:var(--bg)}
+#composer{grid-area:composer;border-top:2px solid var(--line);background:var(--bg)}
 #composer:not(.open){display:none}
 #composer.open{display:block}
 .toolbar{
@@ -370,14 +385,21 @@ button{touch-action:manipulation}
 .preview-pane:empty::before{content:"预览区";color:var(--muted);font-size:12px}
 .preview-pane .preview{min-height:100%;font-size:14px;line-height:1.7;overflow-wrap:anywhere}
 
-/* 编辑器打开时（高度充足）：聊天区保持 flex:1 仍占满剩余高度，编辑器保持其常规高度。
-   是否“高度不足”由 JS 实测消息区可用像素决定：当消息区可用高度过少时，
-   由 JS 给 #app 加 editor-full 类 → 隐藏聊天、让编辑器独占并允许压缩。
+/* 编辑器打开且高度充足：chat 在 chat 分区占满，composer 在 composer 分区自然高——编辑器照常在聊天下方。
+   高度不足时由 JS 实测消息区可用像素，够了就不动；不够才给 #app 加 editor-full：
+       网格缩成 top + main 两个分区，让 #chat 与 #composer.open 都命中同一个 main 分区。
+   两个对象命中同一 named area == 占据完全相同的格子与空间：没有一点属于 composer 却不属于 chat。
+   composer 靠后、不透明背景把它盖住。chat 【从不 display:none】——一直参与布局，消息不会销毁，
+   滚动/分片轮询/贴底判定在切换瞬间也不中断，视觉上只是被编辑器压住。
    注意：即使高度不足，输入框与预览区仍需同时显示，且两者高度相同。 */
-#app.editor-full #chat{display:none}
-#app.editor-full #composer.open{display:flex;flex-direction:column;flex:1 1 auto;min-height:0}
-#app.editor-full .editorArea{height:auto;flex:1 1 auto;min-height:110px}
-#app.editor-full .input-pane,#app.editor-full .preview-pane{flex:1 1 50%;height:auto;display:block;overflow:auto}
+#app.editor-full{
+  grid-template-rows:auto minmax(0,1fr);
+  grid-template-areas:"top" "main";
+}
+#app.editor-full #chat{grid-area:main;min-height:0;overflow-y:auto;overflow-x:hidden}
+#app.editor-full #composer.open{grid-area:main;display:flex;flex-direction:column;min-height:0;overflow:hidden;position:relative;z-index:10}
+#app.editor-full .editorArea{flex:1 1 auto;height:auto;min-height:110px}
+#app.editor-full .input-pane,#app.editor-full .preview-pane{flex:1 1 50%;height:auto;min-height:0;display:block;overflow:auto}
 
 
 
@@ -1639,8 +1661,10 @@ function isTouchDevice(){
 }
 
 /* 把页面高度锁定为“当前布局视口高度 innerHeight”（旋转后已更新、无键盘）的像素值。
-   只在 viewportLayout 判定 outerHeight(窗口真尺寸)变化时才调用；
-   键盘/工具栏只改 innerHeight 不改 outerHeight → 不会走到这里，锁定保持不动。 */
+   由 viewportLayout 调度：只有屏幕可用高(rotation/分屏→ screen.availHeight 变化)或桌面
+   resize 时才会走到这里；键盘/工具栏不改变 availHeight，不会触发。页面里“真高”的避让来自
+   CSS env(safe-area-inset-*) 与 padding，这里只负责把布局视口高写死，防键盘 adjustResize
+   压缩 100% 布局。 */
 function pinLayoutHeight(){
   const h = window.innerHeight;
   document.documentElement.style.height = h + 'px';
@@ -2326,7 +2350,6 @@ function positionNewMsg(){
   newMsgEl.style.left = (r.left + r.width / 2) + 'px';
   newMsgEl.style.transform = 'translateX(-50%)';
   newMsgEl.style.bottom = Math.max(8, window.innerHeight - r.bottom + 8) + 'px';
-  newMsgEl.style.zIndex = '55';
   newMsgEl.style.margin = '0 auto';
   newMsgEl.style.alignSelf = 'auto';
 }
@@ -3715,7 +3738,7 @@ async function init(){
   const composer = document.getElementById('composer');
   const toggleBtn = document.getElementById('editorToggleBtn');
   const appRoot = document.getElementById('app');
-  const MIN_CHAT_PX = 120;   // 消息区可用像素下限：低于则隐藏消息，让编辑器独占
+  const MIN_CHAT_PX = 120;   // 消息区可用像素下限：低于则让编辑器盖住消息区独占（chat 仍保留在层内，仅被覆盖）
 
   /* 编辑器全屏判定（幂等，不闪）：
      聊天可用高 = app 内容高 − 顶栏高 − 编辑器自然高。
@@ -3867,7 +3890,10 @@ function runSearch(q){
 window.__initApp = async function(code, name, canSend){
   CODE = code; ME = {name:name, canSend:canSend};
   document.getElementById('login').style.display = 'none';
-  document.getElementById('app').style.display = 'flex';
+  // 显示主界面：靠 CSS 的 #app.on{display:grid} 触发，不再内联设 display:flex
+  //（内联 flex 会把 CSS Grid 顶成旧的横排布局）。
+  const appEl = document.getElementById('app');
+  if (appEl) appEl.classList.add('on');
   await init();
 };
 
